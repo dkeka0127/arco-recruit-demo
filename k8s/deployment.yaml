@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arco-hr
+  labels: { app: arco-hr }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: arco-hr }
+  template:
+    metadata:
+      labels: { app: arco-hr }
+    spec:
+      # EKS: IRSA(서비스어카운트↔IAM 역할)로 Bedrock/SES 권한 부여
+      serviceAccountName: arco-hr
+      containers:
+        - name: web
+          image: <ECR_REPO>/arco-hr:latest # CI에서 태그 치환
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NODE_ENV
+              value: production
+            # 공개 env — ConfigMap
+            - name: NEXT_PUBLIC_SUPABASE_URL
+              valueFrom:
+                configMapKeyRef: { name: arco-hr-config, key: supabaseUrl }
+            - name: NEXT_PUBLIC_SUPABASE_ANON_KEY
+              valueFrom:
+                configMapKeyRef: { name: arco-hr-config, key: supabaseAnonKey }
+            # 비밀 env — Secret (Bedrock는 IRSA 사용 시 키 불필요)
+            - name: SUPABASE_SERVICE_ROLE_KEY
+              valueFrom:
+                secretKeyRef: { name: arco-hr-secret, key: supabaseServiceRole }
+            - name: AWS_REGION
+              value: ap-northeast-2
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { cpu: "1", memory: "512Mi" }
+          readinessProbe:
+            httpGet: { path: /api/health, port: 3000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/health, port: 3000 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: arco-hr
+spec:
+  selector: { app: arco-hr }
+  ports:
+    - port: 80
+      targetPort: 3000
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: arco-hr
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: arco-hr
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
